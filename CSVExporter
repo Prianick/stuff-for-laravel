@@ -1,0 +1,112 @@
+<?php
+
+
+namespace App\Services\Report;
+
+use App\Exceptions\Exception;
+use App\Http\Requests\UserUpdateRequest;
+use App\Jobs\ExportToCSVTask;
+use App\Models\Wallets\UserWallet;
+use App\User;
+use Illuminate\Http\Request;
+use Illuminate\Routing\Route;
+use Illuminate\Routing\RouteCollection;
+use Illuminate\Routing\Router;
+use Illuminate\Support\Facades\App;
+use Illuminate\Support\Facades\Auth;
+use phpDocumentor\Reflection\Types\Resource_;
+
+class CSVExporter
+{
+    const CSV_DELIMITER = ',';
+
+    protected $uri;
+    protected $params;
+    protected $map;
+    protected $method;
+    protected $fileName;
+    protected $headers;
+    /** @var User */
+    protected $initiator;
+    /** @var Resource_ */
+    protected $output;
+
+    public function addTaskByQuery($uri, $method = 'GET', array $params = [], array $headers = [], array $map = [])
+    {
+        $this->uri = $uri;
+        $this->method = $method;
+        $this->params = $params;
+        $this->map = $map;
+        $this->headers = $headers;
+        $this->fileName = $this->fileName();
+        ExportToCSVTask::dispatch($this);
+        return ['fileName' => $this->fileName];
+    }
+
+    public function setInitiator(User $user)
+    {
+        $this->initiator = $user;
+    }
+
+    public function generateReport()
+    {
+        $this->output = fopen($this->fileName(), 'a+');
+        /** @var Request $request */
+        $request = app('request');
+        /** @var Router $router */
+        $router = app('router');
+        /** @var RouteCollection $routes */
+        $routes = $router->getRoutes();
+        $specRequest = $request->create($this->uri, $this->method, $this->params);
+
+        $route = $routes->match($specRequest);
+        $action = $routes->match($specRequest);
+        $className = explode('@', $action->getActionName())[0];
+        $method = explode('@', $action->getActionName())[1];
+        $reflectionMethod = new \ReflectionMethod($className, $method);
+        $parameters = $reflectionMethod->getParameters();
+        /** @var \ReflectionParameter $parameter */
+        foreach ($parameters as $key => $parameter) {
+            if ($key == 0) {
+                $requestName = $parameter->getClass()->getName();
+                $newRequest = new $requestName($this->params);
+                $newRequest->create($this->uri, $this->method, $this->params);
+            } else {
+                $reflectionClass = $parameter->getClass();
+                try {
+                    $odj = new $reflectionClass->name;
+                    $odj = $odj::query()->find($route->parameters()[$parameter->getName()]);
+                } catch (Exception $e) {
+                }
+            }
+        }
+        Auth::login($this->initiator);
+        $class = app($className);
+        if (!empty($odj)) {
+            $result = $class->$method($newRequest, $odj);
+        } else {
+            $result = $class->$method($newRequest);
+        }
+
+        /** @var Route $route */
+        fwrite($this->output, $this->getHeaderLine());
+
+    }
+
+    protected function fileName()
+    {
+        return 'export' . time() . '.csv';
+    }
+
+    protected function getHeaderLine()
+    {
+        $firstRow = $this->query->first();
+        $keys = array_keys($firstRow->getAttributes());
+        return implode($keys, self::CSV_DELIMITER);
+    }
+
+    protected function getFilterParams()
+    {
+        return $this->query->getQuery();
+    }
+}
